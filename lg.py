@@ -16,6 +16,7 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
 #
 ###
+import ipaddress
 
 import json
 import logging
@@ -263,212 +264,214 @@ SUMMARY_UNWANTED_PROTOS = ['Kernel', 'Static', 'Device']
 
 
 @app.route('/summary/<routers>')
-@app.route('/summary/<routers>/<proto>')
-def summary(routers, proto='ipv4'):
-
-    set_session('summary', routers, proto, '')
+@app.route('/summary/<routers>/<ip_proto>')
+def summary(routers, ip_proto='ipv4'):
+    set_session('summary', routers, ip_proto, '')
     command = 'show protocols'
 
-    summary = {}
+    result = {}
     errors = []
-    for router in routers.split("+"):
-        ret, res = bird_command(router, proto, command)
-        res = res.split("\n")
+    for router in routers.split('+'):
+        ret, res = bird_command(router, ip_proto, command)
+        res = res.split('\n')
 
-        if ret is False:
-            errors.append("%s" % res)
+        if not ret:
+            errors.append(res)
             continue
 
         if len(res) <= 1:
-            errors.append("%s: bird command failed with error, %s" % (router, "\n".join(res)))
+            errors.append("{router}: bird command failed: {response}".format(router=router, response='\n'.join(res)))
             continue
 
         data = []
         for line in res[1:]:
             line = line.strip()
-            if line and (line.split() + [""])[1] not in SUMMARY_UNWANTED_PROTOS:
+            if line and (line.split() + [''])[1] not in SUMMARY_UNWANTED_PROTOS:
                 split = line.split()
                 if len(split) >= 5:
-                    props = dict()
-                    props['name'] = split[0]
-                    props['proto'] = split[1]
-                    props['table'] = split[2]
-                    props['state'] = split[3]
-                    props['since'] = split[4]
-                    props['info'] = ' '.join(split[5:]) if len(split) > 5 else ''
+                    props = {'name': split[0],
+                             'proto': split[1],
+                             'table': split[2],
+                             'state': split[3],
+                             'since': split[4],
+                             'info': ' '.join(split[5:]) if len(split) > 5 else ''}
                     data.append(props)
                 else:
                     app.logger.warning("couldn't parse: {}".format(line))
 
-        summary[router] = data
+        result[router] = data
 
-    return render_template('summary.html', summary=summary, command=command, errors=errors)
+    return render_template('summary.html', summary=result, command=command, errors=errors)
 
 
-@app.route('/detail/<routers>/<proto>')
-def detail(routers, proto):
-    protocol = get_query_string()
+@app.route('/detail/<routers>/<ip_proto>')
+def detail(routers, ip_proto):
+    bird_protocol = get_query_string()
 
-    if not protocol:
+    if not bird_protocol:
         abort(400)
 
-    set_session('detail', routers, proto, protocol)
-    command = 'show protocols all {protocol}'.format(protocol=protocol)
+    set_session('detail', routers, ip_proto, bird_protocol)
+    command = 'show protocols all {protocol}'.format(protocol=bird_protocol)
 
-    detail = {}
+    result = {}
     errors = []
-    for host in routers.split('+'):
-        ret, res = bird_command(host, proto, command)
+    for router in routers.split('+'):
+        ret, res = bird_command(router, ip_proto, command)
         res = res.splitlines()
 
-        if ret is False:
-            errors.append("%s" % res)
+        if not ret:
+            errors.append(res)
             continue
 
         if len(res) <= 1:
-            errors.append("%s: bird command failed with error, %s" % (host, "\n".join(res)))
+            errors.append("{router}: bird command failed: {response}".format(router=router, response="\n".join(res)))
             continue
 
-        detail[host] = {"status": res[1], "description": enrich_text(res[2:])}
+        result[router] = dict(status=res[1], description=enrich_text(res[2:]))
 
-    return render_template('detail.html', detail=detail, command=command, errors=errors)
+    return render_template('detail.html', detail=result, command=command, errors=errors)
 
 
-@app.route('/ping/<routers>/<proto>')
-def ping(routers, proto):
-    host = get_query_string()
+@app.route('/ping/<routers>/<ip_proto>')
+def ping(routers, ip_proto):
+    query = get_query_string()
 
-    if not host:
+    if not query or ip_proto not in ('ipv4', 'ipv6'):
         abort(400)
 
-    set_session("ping", routers, proto, host)
+    set_session('ping', routers, ip_proto, query)
 
-    if proto == "ipv6" and not ipv6_is_valid(host):
+    try:
+        # assume IP Address
+        host = ipaddress.ip_address(query)
+        ip_proto = 'ipv6' if host.version == 6 else 'ipv4'
+    except ValueError:
+        # fallback to DNS Resolution
         try:
-            host = resolve(host, "AAAA")
+            host = resolve(query, 'AAAA' if ip_proto == 'ipv6' else 'A')
         except DNSException:
-            return error_page("%s is unresolvable or invalid for %s" % (host, proto))
-    if proto == "ipv4" and not ipv4_is_valid(host):
-        try:
-            host = resolve(host, "A")
-        except DNSException:
-            return error_page("%s is unresolvable or invalid for %s" % (host, proto))
+            return error_page('Host "{}" is neither a valid IP Address nor could it be resolved through DNS'.format(query))
 
     errors = []
     infos = {}
-    for host in routers.split("+"):
-        status, resultat = bird_proxy(host, proto, "ping", host)
-        if status is False:
-            errors.append("%s" % resultat)
-            continue
-
-        infos[host] = enrich_text(resultat)
-    return render_template('ping.html', infos=infos, errors=errors)
-
-
-@app.route('/traceroute/<routers>/<proto>')
-def traceroute(routers, proto):
-    host = get_query_string()
-
-    if not host:
-        abort(400)
-
-    set_session('traceroute', routers, proto, host)
-
-    if proto == 'ipv6' and not ipv6_is_valid(host):
-        try:
-            host = resolve(host, 'AAAA')
-        except DNSException:
-            return error_page("Unable to resolve host \"{host}\" (AAAA).".format(host=host))
-    elif proto == 'ipv4' and not ipv4_is_valid(host):
-        try:
-            host = resolve(host, 'A')
-        except DNSException:
-            return error_page("Unable to resolve host \"{host}\" (A).".format(host=host))
-    else:
-        abort(400)
-
-    errors = []
-    infos = {}
-    for host in routers.split("+"):
-        status, response = bird_proxy(host, proto, 'traceroute', host)
+    for router in routers.split('+'):
+        status, response = bird_proxy(router, ip_proto, 'ping', host)
         if not status:
             errors.append(response)
             continue
 
-        infos[host] = enrich_text(response)
+        infos[router] = enrich_text(response)
 
-    return render_template('traceroute.html', infos=infos, errors=errors)
-
-
-@app.route('/adv/<routers>/<proto>')
-def show_route_filter(routers, proto):
-    return show_route('adv', routers, proto)
+    return render_template('ping.html', infos=infos, errors=errors)
 
 
-@app.route('/adv_bgpmap/<routers>/<proto>')
-def show_route_filter_bgpmap(routers, proto):
-    return show_route('adv_bgpmap', routers, proto)
+@app.route('/traceroute/<routers>/<ip_proto>')
+def traceroute(routers, ip_proto):
+    query = get_query_string()
+
+    if not query or ip_proto not in ('ipv4', 'ipv6'):
+        abort(400)
+
+    set_session('traceroute', routers, ip_proto, query)
+
+    try:
+        # assume IP Address
+        host = ipaddress.ip_address(query)
+        ip_proto = 'ipv6' if host.version == 6 else 'ipv4'
+    except ValueError:
+        # fallback to DNS Resolution
+        try:
+            host = resolve(query, 'AAAA' if ip_proto == 'ipv6' else 'A')
+        except DNSException:
+            return error_page('Host "{}" is neither a valid IP Address nor could it be resolved through DNS'.format(query))
+
+    result = {}
+    errors = []
+    for router in routers.split('+'):
+        status, response = bird_proxy(router, ip_proto, 'traceroute', host)
+        if not status:
+            errors.append(response)
+            continue
+
+        result[router] = enrich_text(response)
+
+    return render_template('traceroute.html', infos=result, errors=errors)
 
 
-@app.route('/where/<routers>/<proto>')
-def show_route_where(routers, proto):
-    return show_route('where', routers, proto)
+@app.route('/adv/<routers>/<ip_proto>')
+def show_route_filter(routers, ip_proto):
+    return show_route('adv', routers, ip_proto)
 
 
-@app.route('/where_detail/<routers>/<proto>')
-def show_route_where_detail(routers, proto):
-    return show_route('where_detail', routers, proto)
+@app.route('/adv_bgpmap/<routers>/<ip_proto>')
+def show_route_filter_bgpmap(routers, ip_proto):
+    return show_route('adv_bgpmap', routers, ip_proto)
 
 
-@app.route('/where_bgpmap/<routers>/<proto>')
-def show_route_where_bgpmap(routers, proto):
-    return show_route('where_bgpmap', routers, proto)
+@app.route('/where/<routers>/<ip_proto>')
+def show_route_where(routers, ip_proto):
+    return show_route('where', routers, ip_proto)
 
 
-@app.route('/prefix/<routers>/<proto>')
-def show_route_for(routers, proto):
-    return show_route('prefix', routers, proto)
+@app.route('/where_detail/<routers>/<ip_proto>')
+def show_route_where_detail(routers, ip_proto):
+    return show_route('where_detail', routers, ip_proto)
 
 
-@app.route('/prefix_detail/<routers>/<proto>')
-def show_route_for_detail(routers, proto):
-    return show_route('prefix_detail', routers, proto)
+@app.route('/where_bgpmap/<routers>/<ip_proto>')
+def show_route_where_bgpmap(routers, ip_proto):
+    return show_route('where_bgpmap', routers, ip_proto)
 
 
-@app.route('/prefix_bgpmap/<routers>/<proto>')
-def show_route_for_bgpmap(routers, proto):
-    return show_route('prefix_bgpmap', routers, proto)
+@app.route('/prefix/<routers>/<ip_proto>')
+def show_route_for(routers, ip_proto):
+    return show_route('prefix', routers, ip_proto)
+
+
+@app.route('/prefix_detail/<routers>/<ip_proto>')
+def show_route_for_detail(routers, ip_proto):
+    return show_route('prefix_detail', routers, ip_proto)
+
+
+@app.route('/prefix_bgpmap/<routers>/<ip_proto>')
+def show_route_for_bgpmap(routers, ip_proto):
+    return show_route('prefix_bgpmap', routers, ip_proto)
 
 
 def get_as_name(asn):
-    """return a string that contain the as number following by the as name
+    """
+    Query the name for an ASN from a whois server
 
-    It's the use whois database informations
-    # Warning, the server can be blacklisted from ripe is too many requests are done
+    Attention: Too many requests might get you blacklisted by RIPE
+    :param asn: as number
+    :return: as name or 'AS?????' if unknown
     """
     if not asn:
-        return "AS?????"
+        return 'AS?????'
 
     if not asn.isdigit():
         return asn.strip()
 
     name = get_asname_from_whois(whois_command('AS' + asn)).replace(' ', '\r', 1)
-    return "AS%s | %s" % (asn, name)
+    return "AS{num} | {name}".format(num=asn, name=name)
 
 
 def get_as_number_from_protocol_name(host, proto, protocol):
-    ret, res = bird_command(host, proto, "show protocols all {protocol}".format(protocol=protocol))
+    ret, res = bird_command(host, proto, 'show protocols all {protocol}'.format(protocol=protocol))
     match = re.search('Neighbor AS:\s*(\d*)', res)
     if match:
         return match.group(1)
     else:
-        return "?????"
+        return '?????'
 
 
 @app.route('/bgpmap/')
 def show_bgpmap():
-    """return a bgp map in a png file, from the json tree in q argument"""
+    """
+    Render a map of AS paths as specified by the json tree in the query argument
+    :return: Response object with mime type 'image/png'
+    """
     params = get_query_string()
 
     if not params:
@@ -489,8 +492,9 @@ def show_bgpmap():
 
     def add_node(asn, **kwargs):
         if asn not in nodes:
-            kwargs['label'] = '<<TABLE CELLBORDER="0" BORDER="0" CELLPADDING="0" CELLSPACING="0"><TR><TD ALIGN="CENTER">' + escape(kwargs.get("label", get_as_name(asn))).replace("\r", "<BR/>") + "</TD></TR></TABLE>>"
-            nodes[asn] = pydot.Node(asn, style="filled", fontsize="10", **kwargs)
+            # TODO: URGHS!
+            kwargs['label'] = "<<TABLE CELLBORDER=\"0\" BORDER=\"0\" CELLPADDING=\"0\" CELLSPACING=\"0\"><TR><TD ALIGN=\"CENTER\">" + escape(kwargs.get("label", get_as_name(asn))).replace("\r", "<BR/>") + "</TD></TR></TABLE>>"
+            nodes[asn] = pydot.Node(asn, style='filled', fontsize='10', **kwargs)
             graph.add_node(nodes[asn])
 
         return nodes[asn]
@@ -520,7 +524,7 @@ def show_bgpmap():
 
     for host, asmaps in params.iteritems():
         add_node(host,
-                 label="{host}\r{domain}".format(host=host.upper(), domain=app.config['DOMAIN'].upper()),
+                 label='{host}\r{domain}'.format(host=host.upper(), domain=app.config['DOMAIN'].upper()),
                  shape='box', fillcolor='#F5A9A9')
 
         as_number = app.config['AS_NUMBER'].get(host, None)
@@ -631,8 +635,8 @@ def build_as_tree_from_raw_bird_ouput(host, proto, text):
             if expr2.group(1).strip():
                 net_dest = expr2.group(1).strip()
 
-        if line.startswith("BGP.as_path:"):
-            path.extend(line.replace("BGP.as_path:", "").strip().split(" "))
+        if line.startswith('BGP.as_path:'):
+            path.extend(line.replace('BGP.as_path:', '').strip().split(' '))
 
     if path:
         path.append(net_dest)
@@ -730,6 +734,7 @@ def build_as_tree_from_full_view(host, proto, res):
 
 def show_route(request_type, hosts, proto):
     expression = get_query_string()
+
     if not expression:
         abort(400)
 
@@ -737,16 +742,16 @@ def show_route(request_type, hosts, proto):
 
     bgpmap = request_type.endswith('bgpmap')
 
-    all = (request_type.endswith("detail") and " all" or "")
-    if bgpmap:
-        all = " all"
+    with_all = ''
+    if request_type.endswith(('bgpmap', 'detail')):
+        with_all = ' all'
 
     if request_type.startswith("adv"):
         command = "show route " + expression.strip()
         if bgpmap and not command.endswith("all"):
-            command = command + " all"
+            command += ' all'
     elif request_type.startswith("where"):
-        command = "show route where net ~ [ " + expression + " ]" + all
+        command = "show route where net ~ [ " + expression + " ]" + with_all
     else:
         mask = ""
         if len(expression.split("/")) == 2:
@@ -773,7 +778,7 @@ def show_route(request_type, hosts, proto):
         if mask:
             expression += "/" + mask
 
-        command = "show route for " + expression + all
+        command = "show route for " + expression + with_all
 
     detail = {}
     errors = []
