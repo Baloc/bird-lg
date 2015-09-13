@@ -1,6 +1,3 @@
-# -*- coding: utf-8 -*-
-# vim: ts=4
-###
 #
 # Copyright (c) 2006 Mehdi Abaakouk
 #
@@ -17,74 +14,72 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
 #
-###
 
-from dns import resolver, reversename
 
 import socket
 import pickle
-import xml.parsers.expat
 import re
 
+from dns import resolver, reversename
 from flask import Flask
 
-
-resolv = resolver.Resolver()
-resolv.timeout = 0.5
-resolv.lifetime = 1
+resolver = resolver.Resolver()
+resolver.timeout = 0.5
+resolver.lifetime = 1
 
 app = Flask(__name__)
 app.config.from_pyfile('lg.cfg')
 
 
-def resolve(n, q):
-    return str(resolv.query(n, q)[0])
+def resolve(name, rrtype):
+    return str(resolver.query(name, rrtype)[0])
 
-def resolve_ptr(ip):
-    ptr = str(resolve(reversename.from_address(ip), 'PTR')).lower()
+
+def resolve_ptr(ip_addr):
+    ptr = str(resolve(reversename.from_address(ip_addr), 'PTR')).lower()
     ptr = ptr.replace(app.config.get('ROUTER_NAME_REMOVE', ''), '')
     return ptr
 
 
 asname_regex = re.compile("(ASName|as-name):\s+(?P<name>\S+)")
 
+
 def get_asname_from_whois(data):
-    r = asname_regex.search(data)
-    if not r:
+    result = asname_regex.search(data)
+    if not result:
         return 'UNKNOWN-AS'
-    return r.groupdict()['name']
+    return result.groupdict()['name']
 
 
-def mask_is_valid(n):
-    if not n:
+def mask_is_valid(netmask):
+    if not netmask:
         return True
     try:
-        mask = int(n)
-        return (mask >= 1 and mask <= 128)
-    except:
+        mask = int(netmask)
+        return 1 <= mask <= 128
+    except ValueError:
         return False
 
 
-def ipv4_is_valid(n):
+def ipv4_is_valid(addr):
     try:
-        socket.inet_pton(socket.AF_INET, n)
+        socket.inet_pton(socket.AF_INET, addr)
         return True
     except socket.error:
         return False
 
 
-def ipv6_is_valid(n):
+def ipv6_is_valid(addr):
     try:
-        socket.inet_pton(socket.AF_INET6, n)
+        socket.inet_pton(socket.AF_INET6, addr)
         return True
     except socket.error:
         return False
 
 
 def save_cache_pickle(filename, data):
-    output = open(filename, 'wb')
-    pickle.dump(data, output)
-    output.close()
+    with open(filename, 'wb') as output:
+        pickle.dump(data, output)
 
 
 def load_cache_pickle(filename, default=None):
@@ -94,35 +89,9 @@ def load_cache_pickle(filename, default=None):
         return default
     try:
         data = pickle.load(pkl_file)
-    except:
+    except IOError:
         data = default
+
     pkl_file.close()
+
     return data
-
-
-def unescape(s):
-    want_unicode = False
-    if isinstance(s, unicode):
-        s = s.encode("utf-8")
-        want_unicode = True
-
-    # the rest of this assumes that `s` is UTF-8
-    list = []
-
-    # create and initialize a parser object
-    p = xml.parsers.expat.ParserCreate("utf-8")
-    p.buffer_text = True
-    p.returns_unicode = want_unicode
-    p.CharacterDataHandler = list.append
-
-    # parse the data wrapped in a dummy element
-    # (needed so the "document" is well-formed)
-    p.Parse("<e>", 0)
-    p.Parse(s, 0)
-    p.Parse("</e>", 1)
-
-    # join the extracted strings and return
-    es = ""
-    if want_unicode:
-        es = u""
-    return es.join(list)

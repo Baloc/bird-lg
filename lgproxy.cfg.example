@@ -7,8 +7,8 @@ LOG_FILE = "/var/log/bird-lg/lgproxy.log"
 LOG_LEVEL = "WARNING"
 
 # Which IP/port to listen to for the frontend
-BIND_IP = "0.0.0.0"
-BIND_PORT = 5000
+#BIND_IP = "::"
+#BIND_PORT = 12021
 
 # Who can connect to the proxy to launch Bird commands
 ACCESS_LIST = ["192.0.2.42", "2001:db8::42"]

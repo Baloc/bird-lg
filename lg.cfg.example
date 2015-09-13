@@ -9,8 +9,8 @@ LOG_LEVEL="WARNING"
 DOMAIN = "example.com"
 
 # Which IP/port to listen to for client connections.
-BIND_IP = "0.0.0.0"
-BIND_PORT = 5000
+#BIND_IP = "::"
+#BIND_PORT = 12020
 
 # Which backend routers to connect to (here, router1.example.com:5000 and
 # router2.example.com:5000).  The routers must run lgproxy.py.
